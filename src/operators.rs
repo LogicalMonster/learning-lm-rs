@@ -71,25 +71,213 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    // todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    let len = y.size();
+    assert!(len == x.size());
+    let n = w.size();
+    assert!(len % n == 0);
+
+    let y = unsafe { y.data_mut() };
+    let x = x.data();
+    let w = w.data();
+
+    // 按分组大小分割数据
+    for (x_chunk, y_chunk) in x.chunks(n).zip(y.chunks_mut(n)) {
+        // 计算RMS
+        let sum_squares: f32 = x_chunk.iter().map(|&e| e * e).sum();
+        let rms = (sum_squares / n as f32 + epsilon).sqrt();
+
+        // 应用权重和归一化
+        for ((x_val, y_val), w_val) in x_chunk.iter().zip(y_chunk.iter_mut()).zip(w.iter()) {
+            *y_val = w_val * x_val / rms;
+        }
+    }
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let y = unsafe { y.data_mut() };
+    let x = x.data();
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    for i in 0..len {
+        y[i] = (1. / (1. + (-x[i]).exp())) * x[i] * y[i];
+    }
 }
 
+pub fn trans(b: &Tensor<f32>) -> Tensor<f32> {
+    // 获取形状和尺寸
+    let b_shape = b.shape();
+    let (m, n) = (b_shape[b_shape.len() - 2], b_shape[b_shape.len() - 1]);
+
+    // 更新后的形状：交换最后两个维度
+    let mut shape = b_shape.to_vec();
+    shape[b_shape.len() - 2] = n;
+    shape[b_shape.len() - 1] = m;
+
+    // 原始数据
+    let b_data = b.data();
+
+    // 新的数据向量
+    let mut data = Vec::with_capacity(b_data.len());
+
+    // 按块迭代，并进行转置
+    for chunk in b_data.chunks(m * n) {
+        for j in 0..n {
+            for i in 0..m {
+                // 使用直接索引访问元素
+                data.push(chunk[i * n + j]);
+            }
+        }
+    }
+
+    // 构造新的 Tensor
+    Tensor::<f32>::new(data, &shape)
+}
+
+pub fn mul(a: &mut Tensor<f32>, alpha: f32) {
+    let len = a.size();
+
+    // 原始数据
+    let a = unsafe { a.data_mut() };
+
+    // 按块迭代，并进行转置
+    for i in 0..len {
+        a[i] *= alpha;
+    }
+}
+
+pub fn add(a: &mut Tensor<f32>, b: &Tensor<f32>) {
+    let len = a.size();
+
+    // 原始数据
+    let a = unsafe { a.data_mut() };
+    let b = b.data();
+
+    // 按块迭代，并进行转置
+    for i in 0..len {
+        a[i] += b[i];
+    }
+}
+
+// 辅助函数：计算广播形状
+fn broadcast_shape(shape1: &[usize], shape2: &[usize]) -> Vec<usize> {
+    let mut result_shape = vec![];
+    let max_rank = shape1.len().max(shape2.len());
+    for i in 0..max_rank {
+        let dim1 = if i < shape1.len() {
+            shape1[shape1.len() - 1 - i]
+        } else {
+            1
+        };
+        let dim2 = if i < shape2.len() {
+            shape2[shape2.len() - 1 - i]
+        } else {
+            1
+        };
+        if dim1 != dim2 && dim1 != 1 && dim2 != 1 {
+            panic!("Shapes {:?} and {:?} are not broadcastable", shape1, shape2);
+        }
+        result_shape.push(dim1.max(dim2));
+    }
+    result_shape.reverse();
+    result_shape
+}
+
+// 辅助函数：根据广播后的形状计算原始张量的索引
+fn broadcast_index(
+    original_shape: &[usize],
+    broadcast_shape: &[usize],
+    broadcast_idx: usize,
+) -> usize {
+    let mut original_idx = 0;
+    let mut stride = 1;
+    let mut broadcast_stride = 1;
+    for (&orig_dim, &bcast_dim) in original_shape
+        .iter()
+        .rev()
+        .zip(broadcast_shape.iter().rev())
+    {
+        let coord = (broadcast_idx / broadcast_stride % bcast_dim) % orig_dim;
+        original_idx += coord * stride;
+        stride *= orig_dim;
+        broadcast_stride *= bcast_dim;
+    }
+    original_idx
+}
+
+pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
+    // 检查输入维度是否符合矩阵乘法要求
+    if a.shape().len() < 2 || b.shape().len() < 2 {
+        panic!("Both tensors must be at least 2D for matrix multiplication.");
+    }
+    if a.shape()[a.shape().len() - 1] != b.shape()[b.shape().len() - 2] {
+        panic!(
+            "Matrix multiplication not possible: {:?} and {:?}",
+            a.shape(),
+            b.shape()
+        );
+    }
+
+    // 获取输入张量的非矩阵维度
+    let batch_shape1 = &a.shape()[..a.shape().len() - 2];
+    let batch_shape2 = &b.shape()[..b.shape().len() - 2];
+
+    // 计算广播后的批量维度
+    let broadcast_shape = broadcast_shape(batch_shape1, batch_shape2);
+
+    // 获取矩阵乘法的维度
+    let m = a.shape()[a.shape().len() - 2];
+    let n = a.shape()[a.shape().len() - 1];
+    let p = b.shape()[b.shape().len() - 1];
+
+    // 最终结果的形状
+    let mut result_shape = broadcast_shape.clone();
+    result_shape.push(m);
+    result_shape.push(p);
+
+    // 数据准备
+    let result_size: usize = result_shape.iter().product();
+    let mut result_data = vec![0.0; result_size];
+
+    // 迭代批量维度，计算每个矩阵的结果
+    for batch_idx in 0..broadcast_shape.iter().product::<usize>() {
+        // 计算广播后的索引
+        let idx1 = broadcast_index(&batch_shape1, &broadcast_shape, batch_idx);
+        let idx2 = broadcast_index(&batch_shape2, &broadcast_shape, batch_idx);
+
+        // 提取具体的矩阵
+        let a = &a.data()[idx1 * m * n..][..m * n];
+        let b = &b.data()[idx2 * n * p..][..n * p];
+
+        // 计算矩阵乘法结果
+        let result_offset = batch_idx * m * p;
+        for i in 0..m {
+            for j in 0..p {
+                for k in 0..n {
+                    result_data[result_offset + i * p + j] += a[i * n + k] * b[k * p + j];
+                }
+            }
+        }
+    }
+
+    // 创建结果张量
+    Tensor::new(result_data, &result_shape)
+}
+
+// 矩阵乘法（B矩阵转置）
 // C = beta * C + alpha * A @ B^T
-// hint: You don't need to do an explicit transpose of B
+// 注意：不需要显式地转置B矩阵
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    mul(c, beta);
+    let mut foo = matmul(a, &trans(b));
+    mul(&mut foo, alpha);
+    add(c, &foo);
 }
 
 // Dot product of two tensors (treated as vectors)
