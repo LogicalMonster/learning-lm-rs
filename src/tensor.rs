@@ -61,8 +61,6 @@ impl<T: Copy + Clone + Default> Tensor<T> {
             length: new_length,
         }
     }
-
-
 }
 
 // Some helper functions for testing and debugging
@@ -74,12 +72,15 @@ impl Tensor<f32> {
         }
         let a = self.data();
         let b = other.data();
-        
+
         return a.iter().zip(b).all(|(x, y)| float_eq(x, y, rel));
     }
     #[allow(unused)]
-    pub fn print(&self){
-        println!("shpae: {:?}, offset: {}, length: {}", self.shape, self.offset, self.length);
+    pub fn print(&self) {
+        println!(
+            "shpae: {:?}, offset: {}, length: {}",
+            self.shape, self.offset, self.length
+        );
         let dim = self.shape()[self.shape().len() - 1];
         let batch = self.length / dim;
         for i in 0..batch {
@@ -92,4 +93,40 @@ impl Tensor<f32> {
 #[inline]
 pub fn float_eq(x: &f32, y: &f32, rel: f32) -> bool {
     (x - y).abs() <= rel * (x.abs() + y.abs()) / 2.0
+}
+
+#[test]
+fn test_tensor() {
+    // 创建一个张量
+    let shape = vec![2, 3]; // 张量形状为 2x3
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let tensor = Tensor::new(data, &shape);
+
+    // 打印张量信息和数据
+    tensor.print();
+
+    // 检查张量大小
+    assert_eq!(tensor.size(), 6);
+
+    // 重塑张量
+    let new_shape = vec![3, 2];
+    let mut new_tensor = Tensor::new(tensor.data().to_vec(), &new_shape);
+    new_tensor.reshape(&new_shape);
+    println!("After reshape:");
+    new_tensor.print();
+
+    // 切片操作
+    let slice_shape = vec![1, 3];
+    let sliced_tensor = tensor.slice(3, &slice_shape);
+    println!("After slicing:");
+    sliced_tensor.print();
+
+    // 使用默认值创建张量
+    let default_tensor = Tensor::<f32>::default(&shape);
+    println!("Default tensor:");
+    default_tensor.print();
+
+    // 验证两个张量是否接近
+    let close = tensor.close_to(&sliced_tensor, 0.1);
+    println!("Is original tensor close to sliced tensor? {}", close);
 }
