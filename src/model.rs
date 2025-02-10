@@ -1,3 +1,4 @@
+// src/model.rs
 use std::fs::File;
 use std::process::exit;
 use std::vec;
@@ -178,7 +179,7 @@ impl Llama<f32> {
         // result
         let mut result = Vec::<u32>::new(); // 初始化结果，用输入的 token_ids 开始
 
-        let mut cache = self.new_cache();
+        let mut cache: KVCache<f32> = self.new_cache();
 
         let mut input = Tensor::<u32>::new(token_ids.to_vec(), &vec![token_ids.len()]);
 
@@ -200,66 +201,185 @@ impl Llama<f32> {
 
         result
     }
+
+    /// chat_generate 与 generate 类似，但接收外部 kvcache 用于多轮对话
+    pub fn chat_generate(
+        &self,
+        token_ids: &[u32],
+        max_len: usize,
+        top_p: f32,
+        top_k: u32,
+        temperature: f32,
+        cache: &mut KVCache<f32>,  // 假定 kvcache 模块中定义了 Cache 类型
+    ) -> Vec<u32> {
+        let mut result = Vec::<u32>::new();
+        let mut input = Tensor::<u32>::new(token_ids.to_vec(), &vec![token_ids.len()]);
+        while result.len() < max_len {
+            // 前向推理，传入当前 token 及持久化 cache
+            let logits = self.forward(&input, cache);
+            // 根据 logits 使用 top-p、top-k 及温度采样生成下一个 token
+            let next_token = OP::random_sample(&logits, top_p, top_k, temperature);
+            result.push(next_token);
+            // 如果生成结束符则退出
+            if next_token == self.eos_token_id {
+                break;
+            }
+            // 下次生成时只输入刚生成的 token（同时 cache 中已保存了之前的信息）
+            input = Tensor::<u32>::new(vec![next_token], &vec![1]);
+        }
+        result
+    }
 }
 
+// fn self_attention(
+//     mut hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
+//     att_scores: &mut Tensor<f32>,        // (n_kv_h, n_groups, seq, total_seq)
+//     q: &Tensor<f32>,                     // (seq, n_kv_h * n_groups * dqkv)
+//     k: &Tensor<f32>,                     // (total_seq, n_kv_h * dqkv)
+//     v: &Tensor<f32>,                     // (total_seq, n_kv_h * dqkv)
+//     n_kv_h: usize,
+//     n_groups: usize,
+//     seq_len: usize,
+//     total_seq_len: usize,
+//     dqkv: usize,
+// ) {
+//     // q: [seq_len, n_kv_h * n_groups * dqkv] -> [n_kv_h, n_groups, seq_len, dqkv]
+//     let q = Tensor::new(q.data().to_vec(), &vec![seq_len, n_kv_h * n_groups * dqkv]);
+//     let mut q = OP::trans(&q);
+//     let q = q.reshape(&vec![n_kv_h, n_groups, dqkv, seq_len]);
+//     let q = OP::trans(q);
+
+//     // k: [total_seq_len, n_kv_h * dqkv] -> [n_kv_h, 1, total_seq_len, dqkv]
+//     let k = Tensor::new(k.data().to_vec(), &vec![total_seq_len, n_kv_h * dqkv]);
+//     let mut k = OP::trans(&k);
+//     let k = k.reshape(&vec![n_kv_h, 1, dqkv, total_seq_len]);
+//     let k = OP::trans(k);
+
+//     // att_scores: [n_kv_h, n_groups, seq_len, total_seq_len]
+//     OP::matmul_transb(att_scores, 0., &q, &k, 1. / (dqkv as f32).sqrt());
+//     OP::masked_softmax(att_scores);
+
+//     // temp: [n_kv_h, n_groups, seq_len, dqkv]
+//     let mut temp = Tensor::new(
+//         hidden_states.data().to_vec(),
+//         &vec![n_kv_h, n_groups, seq_len, dqkv],
+//     );
+
+//     // v: [total_seq_len, n_kv_h * dqkv] -> [n_kv_h, 1, dqkv, total_seq_len]
+//     let v = Tensor::new(v.data().to_vec(), &vec![total_seq_len, n_kv_h * dqkv]);
+//     let mut v = OP::trans(&v);
+//     let v = v.reshape(&vec![n_kv_h, 1, dqkv, total_seq_len]);
+
+//     // temp: [n_kv_h, n_groups, seq_len, dqkv]
+//     OP::matmul_transb(&mut temp, 0., &att_scores, &v, 1.);
+
+//     // temp: [n_kv_h, n_groups, seq_len, dqkv] -> [seq_len, n_kv_h * n_groups * dqkv]
+//     let mut temp = OP::trans(&temp);
+//     let temp = temp.reshape(&vec![n_kv_h * n_groups * dqkv, seq_len]);
+//     let temp = OP::trans(&temp);
+    
+//     // hidden_states = temp
+//     let temp_data = temp.data();
+//     let hidden_states_data_mut = unsafe { hidden_states.data_mut() };
+//     let m = seq_len;
+//     let n = n_kv_h * n_groups * dqkv;
+//     for i in 0..m {
+//         for j in 0..n {
+//             hidden_states_data_mut[i * n + j] = temp_data[i * n + j];
+//         }
+//     }
+// }
+
 fn self_attention(
-    mut hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
-    att_scores: &mut Tensor<f32>,        // (n_kv_h, n_groups, seq, total_seq)
-    q: &Tensor<f32>,                     // (seq, n_kv_h * n_groups * dqkv)
-    k: &Tensor<f32>,                     // (total_seq, n_kv_h * dqkv)
-    v: &Tensor<f32>,                     // (total_seq, n_kv_h * dqkv)
-    n_kv_h: usize,
-    n_groups: usize,
-    seq_len: usize,
-    total_seq_len: usize,
-    dqkv: usize,
+    hidden_states: &mut Tensor<f32>, // 输出张量，形状为 [seq_len, n_kv_h * n_groups * dqkv]
+    att_scores: &mut Tensor<f32>,    // 临时张量，形状为 [n_kv_h, n_groups, seq_len, total_seq_len]
+    q: &Tensor<f32>,                 // 查询张量，形状为 [seq_len, n_kv_h * n_groups * dqkv]
+    k: &Tensor<f32>,                 // 键张量，形状为 [total_seq_len, n_kv_h * dqkv]
+    v: &Tensor<f32>,                 // 值张量，形状为 [total_seq_len, n_kv_h * dqkv]
+    n_kv_h: usize,   // 针对 k 和 v 的 head 数
+    n_groups: usize, // 对于 q 来说：n_q_heads = n_kv_h * n_groups
+    seq_len: usize,  // 当前序列长度（查询数目）
+    total_seq_len: usize, // 过去与当前所有 token 数（键和值的行数）
+    dqkv: usize,     // 每个 q、k、v 的向量长度
 ) {
-    // q: [seq_len, n_kv_h * n_groups * dqkv] -> [n_kv_h, n_groups, seq_len, dqkv]
-    let q = Tensor::new(q.data().to_vec(), &vec![seq_len, n_kv_h * n_groups * dqkv]);
-    let mut q = OP::trans(&q);
-    let q = q.reshape(&vec![n_kv_h, n_groups, dqkv, seq_len]);
-    let q = OP::trans(q);
+    // 缩放因子 1/sqrt(dqkv)
+    let scale = 1.0 / (dqkv as f32).sqrt();
 
-    // k: [total_seq_len, n_kv_h * dqkv] -> [n_kv_h, 1, total_seq_len, dqkv]
-    let k = Tensor::new(k.data().to_vec(), &vec![total_seq_len, n_kv_h * dqkv]);
-    let mut k = OP::trans(&k);
-    let k = k.reshape(&vec![n_kv_h, 1, dqkv, total_seq_len]);
-    let k = OP::trans(k);
+    // 取 q, k, v 的底层数据（只读）
+    let q_data = q.data();
+    let k_data = k.data();
+    let v_data = v.data();
 
-    // att_scores: [n_kv_h, n_groups, seq_len, total_seq_len]
-    OP::matmul_transb(att_scores, 0., &q, &k, 1. / (dqkv as f32).sqrt());
+    // --- 1. 计算注意力得分 ---
+    // 将 q 视为逻辑形状 [seq_len, n_kv_h, n_groups, dqkv]，即：
+    //   q[t, head, group, d] = q[ t * (n_kv_h*n_groups*dqkv) + (head*n_groups+group)*dqkv + d ]
+    //
+    // k 视为 [total_seq_len, n_kv_h, dqkv]：
+    //   k[s, head, d] = k[ s * (n_kv_h*dqkv) + head*dqkv + d ]
+    //
+    // att_scores 的逻辑形状为 [n_kv_h, n_groups, seq_len, total_seq_len]，
+    // 下标计算公式：
+    //   att_scores[head, group, t, s] =
+    //       att_data[ ((head * n_groups + group) * seq_len + t) * total_seq_len + s ]
+    //
+    // 此处将所有对 att_scores 的写操作限定在一个代码块中，
+    // 保证结束后 mutable borrow 结束，从而后续可再次借用 att_scores。
+    {
+        let att_data = unsafe { att_scores.data_mut() };
+        for head in 0..n_kv_h {
+            for group in 0..n_groups {
+                for t in 0..seq_len {
+                    // 计算 att_scores 在底层存储中的起始下标：
+                    let att_base = ((head * n_groups + group) * seq_len + t) * total_seq_len;
+                    // q[t, head, group, :] 在 q 中的起始下标
+                    let q_base = t * (n_kv_h * n_groups * dqkv) + (head * n_groups + group) * dqkv;
+                    for s in 0..total_seq_len {
+                        let mut dot = 0.0;
+                        // k[s, head, :] 在 k 中的起始下标
+                        let k_base = s * (n_kv_h * dqkv) + head * dqkv;
+                        for d in 0..dqkv {
+                            dot += q_data[q_base + d] * k_data[k_base + d];
+                        }
+                        att_data[att_base + s] = dot * scale;
+                    }
+                }
+            }
+        }
+    } // 此处 mutable borrow 对 att_scores 结束
+
+    // --- 2. 应用 masked softmax ---
+    // 调用已有的实现，对 att_scores 进行归一化处理
     OP::masked_softmax(att_scores);
 
-    // temp: [n_kv_h, n_groups, seq_len, dqkv]
-    let mut temp = Tensor::new(
-        hidden_states.data().to_vec(),
-        &vec![n_kv_h, n_groups, seq_len, dqkv],
-    );
-
-    // v: [total_seq_len, n_kv_h * dqkv] -> [n_kv_h, 1, dqkv, total_seq_len]
-    let v = Tensor::new(v.data().to_vec(), &vec![total_seq_len, n_kv_h * dqkv]);
-    let mut v = OP::trans(&v);
-    let v = v.reshape(&vec![n_kv_h, 1, dqkv, total_seq_len]);
-
-    // temp: [n_kv_h, n_groups, seq_len, dqkv]
-    OP::matmul_transb(&mut temp, 0., &att_scores, &v, 1.);
-
-    // temp: [n_kv_h, n_groups, seq_len, dqkv] -> [seq_len, n_kv_h * n_groups * dqkv]
-    let mut temp = OP::trans(&temp);
-    let temp = temp.reshape(&vec![n_kv_h * n_groups * dqkv, seq_len]);
-    let temp = OP::trans(&temp);
-    
-    // hidden_states = temp
-    let temp_data = temp.data();
-    let hidden_states_data_mut = unsafe { hidden_states.data_mut() };
-    let m = seq_len;
-    let n = n_kv_h * n_groups * dqkv;
-    for i in 0..m {
-        for j in 0..n {
-            hidden_states_data_mut[i * n + j] = temp_data[i * n + j];
+    // --- 3. 利用注意力权重对 v 加权求和，得到输出 hidden_states ---
+    // 输出 hidden_states 的逻辑形状为 [seq_len, n_kv_h, n_groups, dqkv]，
+    // 下标计算为：
+    //   hidden_states[t, head, group, d] =
+    //     sum_{s=0}^{total_seq_len-1} ( att_scores[head, group, t, s] * v[s, head, d] )
+    let hidden_data = unsafe { hidden_states.data_mut() };
+    {
+        // 此处只需要对 att_scores 进行只读借用，因而使用 data() 即可
+        let att_data = att_scores.data();
+        for head in 0..n_kv_h {
+            for group in 0..n_groups {
+                for t in 0..seq_len {
+                    let out_base = t * (n_kv_h * n_groups * dqkv) + (head * n_groups + group) * dqkv;
+                    let att_base = ((head * n_groups + group) * seq_len + t) * total_seq_len;
+                    for d in 0..dqkv {
+                        let mut sum_val = 0.0;
+                        for s in 0..total_seq_len {
+                            // v[s, head, d] 在 v 中的下标：
+                            let v_index = s * (n_kv_h * dqkv) + head * dqkv + d;
+                            sum_val += att_data[att_base + s] * v_data[v_index];
+                        }
+                        hidden_data[out_base + d] = sum_val;
+                    }
+                }
+            }
         }
     }
 }
+
 
 fn mlp(
     residual: &mut Tensor<f32>,

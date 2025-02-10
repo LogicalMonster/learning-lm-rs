@@ -1,3 +1,4 @@
+// src/tensor.rs
 use std::{slice, sync::Arc, vec};
 pub struct Tensor<T> {
     data: Arc<Box<[T]>>,
