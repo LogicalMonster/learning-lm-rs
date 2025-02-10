@@ -24,10 +24,10 @@ impl LLamaParams<f32> {
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
         // todo!("实现从safetensors文件的模型参数加载");
         // 打印所有张量名称
-        // println!("Available tensors:");
-        // for name in safetensor.names() {
-        //     println!("{}", name);
-        // }
+        println!("Available tensors:");
+        for name in safetensor.names() {
+            println!("{}", name);
+        }
 
         // 辅助函数：从 safetensors 中获取张量
         let get_tensor = |name: &str| -> Tensor<f32> {
